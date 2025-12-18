@@ -8,6 +8,7 @@ from utils.preprocessing import normalize_x_y_pressure, resample_signature
 from scipy import stats
 from scipy.spatial import ConvexHull
 from sklearn.covariance import MinCovDet
+from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from sklearn.neighbors import KernelDensity
 from sklearn.linear_model import LogisticRegression
@@ -22,7 +23,8 @@ class StatisticsSignatureVerifier(SignatureVerifier):
     
     def __init__(self, prior_genuine=0.5):
         self.scaler = StandardScaler(with_mean=True, with_std=True)
-        self.robust_cov = MinCovDet(support_fraction=1)
+        self.pca = PCA(n_components=0.95) 
+        self.robust_cov = MinCovDet(support_fraction=0.9)
         
         self.kde_genuine = None
         self.kde_forged = None
@@ -71,12 +73,6 @@ class StatisticsSignatureVerifier(SignatureVerifier):
         # Общая длина подписи
         length = np.sum(velocity)
 
-        # Отношение общей длины подписи к евклидову расстоянию между начальной и конечной точками. 
-        denominator = np.sqrt(
-            np.power(np.max(x_before) - np.min(x_before), 2)
-            + np.power(np.max(y_before) - np.min(y_before), 2)
-        )
-
         points = np.column_stack((x_before, y_before))
         unique_points = np.unique(points, axis=0)
         hull_area = 0
@@ -121,10 +117,17 @@ class StatisticsSignatureVerifier(SignatureVerifier):
         self.features = np.array([self.extract_features(sig) for sig in processed])
         self.features_number = self.features.shape[1]
 
-        transformed_features = self.scaler.fit_transform(self.features)
-        self.robust_cov.fit(transformed_features)
+        raw_features = np.array([self.extract_features(sig) for sig in processed])
 
-        self.genuine_distances = self._calculate_distances(self.features)
+        self.features_scaled = self.scaler.fit_transform(raw_features)
+        self.features_pca = self.pca.fit_transform(self.features_scaled)
+        
+        logging.info(f"PCA компоненты выбраны: {self.pca.n_components_}")
+        logging.info(f"explained_variance_ratio: {sum(self.pca.explained_variance_ratio_):.2f}")
+
+        self.robust_cov.fit(self.features_pca)
+
+        self.genuine_distances = self._calculate_distances(raw_features)
         self.sorted_genuine_distances = sorted(self.genuine_distances)
         
         self.threshold = np.percentile(self.genuine_distances, 95)
@@ -145,26 +148,31 @@ class StatisticsSignatureVerifier(SignatureVerifier):
         genuine_dist_reshaped = self.genuine_distances.reshape(-1, 1)
         forged_dist_reshaped = self.forged_distances.reshape(-1, 1)
 
-        # Перекрёстная проверка для нахождения оптимального значения bandwidth для KDE
-        grid = GridSearchCV(KernelDensity(), {'bandwidth': np.logspace(-1, 1, 20)}, cv=3)
-        
-        grid.fit(genuine_dist_reshaped)
-        self.kde_genuine = grid.best_estimator_
-        logging.info(f"KDE Genuine bandwidth: {self.kde_genuine.bandwidth_}")
+        grid_gen = GridSearchCV(KernelDensity(), {'bandwidth': np.logspace(0, 1, 20)}, cv=3)
+        grid_gen.fit(genuine_dist_reshaped)
+        self.kde_genuine = grid_gen.best_estimator_
+        logging.debug(f"KDE bandwidth [Genuine]: {self.kde_genuine.bandwidth_:.4f}")
 
-        grid.fit(forged_dist_reshaped)
-        self.kde_forged = grid.best_estimator_
-        logging.info(f"KDE Forged bandwidth: {self.kde_forged.bandwidth_}")
+        grid_forg = GridSearchCV(KernelDensity(), {'bandwidth': np.logspace(0, 2.7, 20)}, cv=3)
+        grid_forg.fit(forged_dist_reshaped)
+        self.kde_forged = grid_forg.best_estimator_
+        logging.debug(f"KDE bandwidth [Forged]: {self.kde_forged.bandwidth_:.4f}")
+        
+        grid_gen.fit(genuine_dist_reshaped)
+        self.kde_genuine = grid_gen.best_estimator_
+
+        grid_forg.fit(forged_dist_reshaped)
+        self.kde_forged = grid_forg.best_estimator_
 
         # Обучение калибраторов.
         # Данные для обучения: X = distances, y = labels (1 - настоящие, 0 - поддельные)
         X_calib = np.concatenate((self.genuine_distances, self.forged_distances)).reshape(-1, 1)
         y_calib = np.concatenate((np.ones_like(self.genuine_distances), np.zeros_like(self.forged_distances)))
 
-        self.logistic_calibrator = LogisticRegression()
+        self.logistic_calibrator = LogisticRegression(solver='liblinear', max_iter=1000)
         self.logistic_calibrator.fit(X_calib, y_calib)
 
-        self.isotonic_calibrator = IsotonicRegression(out_of_bounds='clip')
+        self.isotonic_calibrator = IsotonicRegression(out_of_bounds='clip', increasing=False)
         self.isotonic_calibrator.fit(X_calib, y_calib)
 
 
@@ -175,7 +183,8 @@ class StatisticsSignatureVerifier(SignatureVerifier):
         так и форму распределения (ковариационную матрицу)
         '''
         x_scaled = self.scaler.transform(features)
-        return self.robust_cov.mahalanobis(x_scaled)
+        x_pca = self.pca.transform(x_scaled)
+        return self.robust_cov.mahalanobis(x_pca)
     
     def verify(self, test_signature: pd.DataFrame) -> dict:
         '''
@@ -214,7 +223,10 @@ class StatisticsSignatureVerifier(SignatureVerifier):
                 # Теорема Байеса для нахождения P(Genuine | D = d) = P(D | Genuine) * P(Genuine) / P(D)
                 prob_bayesian_kde = (likelihood_genuine * prior_genuine) / evidence
             else:
-                prob_bayesian_kde = prior_genuine
+                if distance > self.threshold:
+                    prob_bayesian_kde = 0
+                else:
+                    prob_bayesian_kde = prior_genuine
 
         if self.logistic_calibrator:
             # predict_proba возвращает [[P(0), P(1)]]
@@ -226,7 +238,7 @@ class StatisticsSignatureVerifier(SignatureVerifier):
         return {
             'distance': distance,
             'is_genuine': distance <= self.threshold,
-            'p_ecdf': p_ecdf, # P(Dist <= d | Genuine)
+            'p_ecdf': p_ecdf,                       # P(Dist <= d | Genuine)
             'threshold': self.threshold,
             'prob_bayesian_kde': prob_bayesian_kde, # P(Genuine | Dist = d)
             'prob_logistic': prob_logistic,         # P(Genuine | Dist = d)
@@ -250,8 +262,15 @@ class StatisticsSignatureVerifier(SignatureVerifier):
 
         plt.figure(figsize=(12, 8))
         
-        plt.hist(self.genuine_distances, bins=20, density=True, alpha=0.6, color='green', label='Genuine Расстояния')
-        plt.hist(self.forged_distances, bins=20, density=True, alpha=0.6, color='red', label='Forged Расстояния')
+        all_data = np.concatenate([self.genuine_distances, self.forged_distances])
+        min_val = np.min(all_data)
+        max_val = np.max(all_data)
+
+        # гистограммы с общей сеткой
+        common_bins = np.linspace(min_val, max_val, 50)
+
+        plt.hist(self.genuine_distances, bins=common_bins, color='green', alpha=0.6, density=True)
+        plt.hist(self.forged_distances, bins=common_bins, color='red', alpha=0.6, density=True)
         
         # KDE-кривые
         x_plot = np.linspace(0, max(max(self.genuine_distances), max(self.forged_distances)), 1000)[:, np.newaxis]
@@ -268,6 +287,42 @@ class StatisticsSignatureVerifier(SignatureVerifier):
         plt.ylabel('Частота')
         plt.legend()
         plt.grid(True)
+        plt.show()
+
+    def plot_calibration_curves(self):
+        """
+        Построение кривых калибровки: зависимость вероятности P(X) от расстояния.
+        """
+        if self.logistic_calibrator is None or self.isotonic_calibrator is None:
+            print("Калибраторы не обучены. Необходим предварительный вызов load_forgeries_and_calibrate().")
+            return
+
+        plt.figure(figsize=(10, 6))
+        ax = plt.gca()
+
+        limit_x = max(np.max(self.forged_distances) / 4, self.threshold) * 2.5
+        x_grid = np.linspace(0, limit_x, 500).reshape(-1, 1)
+
+        y_logistic = self.logistic_calibrator.predict_proba(x_grid)[:, 1]
+        y_isotonic = self.isotonic_calibrator.predict(x_grid)
+
+        plt.scatter(self.genuine_distances, np.ones_like(self.genuine_distances), color='green', alpha=0.5, s=60, label='Genuine')
+        
+        forged_vis = self.forged_distances[self.forged_distances < limit_x]
+        plt.scatter(forged_vis, np.zeros_like(forged_vis), color='red', alpha=0.5, s=60, label='Forged')
+
+        plt.plot(x_grid, y_logistic, label='Логистическая регрессия', color='blue', linewidth=2)
+        plt.plot(x_grid, y_isotonic, label='Изотоническая регрессия', color='orange', linewidth=2, linestyle='--')
+
+        plt.axvline(self.threshold, color='black', linestyle=':', label='Threshold 95%')
+
+        plt.xlim(0, limit_x)
+        plt.ylim(-0.05, 1.05)
+        plt.title('Функции калибровки вероятности')
+        plt.xlabel('Расстояние Махаланобиса')
+        plt.ylabel('Вероятность подлинности P(Genuine|d)')
+        plt.legend(loc='center right')
+        plt.grid(True, alpha=0.3)
         plt.show()
 
     def print_result(self, result: dict, is_genuine: bool):

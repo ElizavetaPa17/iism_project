@@ -1,8 +1,7 @@
 import numpy as np
 import pandas as pd
 from scipy import interpolate
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
-import os
+from sklearn.preprocessing import MinMaxScaler
 
 def find_header_row_and_sep(file_path):
     try:

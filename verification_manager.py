@@ -1,7 +1,3 @@
-import pandas as pd
-import numpy as np
-import logging
-
 from utils.preprocessing import load_signature
 
 from task1.ks_verifier import KolmogorovSmirnovSignatureVerifier as SimpleKSVerifier
@@ -19,6 +15,7 @@ class VerificationManager:
 
     def __init__(self):
         self.genuine_signatures = []
+        self.forged_signatures = []
         self.current_verifier = None
         self.current_method_name = ""
 
@@ -30,6 +27,19 @@ class VerificationManager:
                 df = load_signature(path)
                 if not df.empty:
                     self.genuine_signatures.append(df)
+                    loaded_count += 1
+            except Exception as e:
+                print(f"Ошибка загрузки {path}: {e}")
+        return loaded_count
+    
+    def load_forged_signatures(self, file_paths):
+        self.forged_signatures = []
+        loaded_count = 0
+        for path in file_paths:
+            try:
+                df = load_signature(path)
+                if not df.empty:
+                    self.forged_signatures.append(df)
                     loaded_count += 1
             except Exception as e:
                 print(f"Ошибка загрузки {path}: {e}")
@@ -50,6 +60,8 @@ class VerificationManager:
         elif method_name == "Statistical (Mahalanobis)":
             self.current_verifier = StatisticsSignatureVerifier()
             self.current_verifier.load(self.genuine_signatures)
+            if len(self.forged_signatures) > 0: 
+                self.current_verifier.load_forgeries_and_calibrate(self.forged_signatures)
 
         elif method_name == "Robust (Voting)":
             self.current_verifier = RobustKolmogorovSmirnovVerifier(self.genuine_signatures)
@@ -68,6 +80,10 @@ class VerificationManager:
 
         except Exception as e:
             return {"error": str(e), "is_genuine": False, "confidence": 0.0, "details": str(e)}
+        
+    def plot(self):
+        self.current_verifier.plot_distributions()
+        self.current_verifier.plot_calibration_curves()
 
     def _standardize_result(self, raw_result):
         response = {
@@ -96,6 +112,11 @@ class VerificationManager:
                 response["confidence"] = raw_result['prob_bayesian_kde'] * 100
             else:
                 response["confidence"] = raw_result.get('p_ecdf', 0) * 100
+
+            if raw_result.get('prob_logistic') is not None:
+                response["confidence_log"] = raw_result['prob_logistic'] * 100
+            if raw_result.get('prob_isotonic') is not None:
+                response["confidence_iso"] = raw_result['prob_isotonic'] * 100
 
             dist = raw_result['distance']
             thresh = raw_result.get('threshold', 0)

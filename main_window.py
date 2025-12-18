@@ -1,10 +1,9 @@
-import sys
 import os
-from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
                              QPushButton, QLabel, QFileDialog, QListWidget,
                              QComboBox, QTableWidget, QTableWidgetItem,
                              QSplitter, QHeaderView, QMessageBox, QGroupBox,
-                             QAbstractItemView, QScrollArea, QFrame, QSizePolicy)
+                             QAbstractItemView, QScrollArea, QFrame)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor, QFont
 
@@ -52,7 +51,23 @@ class MainWindow(QMainWindow):
         gb_gen_layout.addWidget(self.list_genuine)
         gb_genuine.setLayout(gb_gen_layout)
 
-        gb_method = QGroupBox("2. Метод проверки")
+        gb_forged = QGroupBox("2. Подделки (Forged)")
+        gb_forged.setStyleSheet("QGroupBox { font-weight: bold; }")
+        gb_forged_layout = QVBoxLayout()
+
+        self.btn_load_forged = QPushButton("📂 Загрузить подделки")
+        self.btn_load_forged.setFixedHeight(40) 
+        self.btn_load_forged.clicked.connect(self.load_forged_files)
+
+        self.list_forged = QListWidget()
+        self.list_forged.setMaximumHeight(150) 
+        self.list_forged.itemClicked.connect(lambda item: self.display_signature(item, is_genuine=False))
+
+        gb_forged_layout.addWidget(self.btn_load_forged)
+        gb_forged_layout.addWidget(self.list_forged)
+        gb_forged.setLayout(gb_forged_layout)
+
+        gb_method = QGroupBox("3. Метод проверки")
         gb_method.setStyleSheet("QGroupBox { font-weight: bold; }")
         gb_meth_layout = QVBoxLayout()
 
@@ -70,7 +85,7 @@ class MainWindow(QMainWindow):
         gb_meth_layout.addWidget(self.btn_train)
         gb_method.setLayout(gb_meth_layout)
 
-        gb_test = QGroupBox("3. Проверка (Test)")
+        gb_test = QGroupBox("4. Проверка (Test)")
         gb_test.setStyleSheet("QGroupBox { font-weight: bold; }")
         gb_test_layout = QVBoxLayout()
 
@@ -108,6 +123,7 @@ class MainWindow(QMainWindow):
         gb_test.setLayout(gb_test_layout)
 
         left_layout.addWidget(gb_genuine)
+        left_layout.addWidget(gb_forged)
         left_layout.addWidget(gb_method)
         left_layout.addWidget(gb_test)
         left_layout.addStretch() 
@@ -153,6 +169,20 @@ class MainWindow(QMainWindow):
             count = self.manager.load_genuine_signatures(self.genuine_paths)
             self.statusBar().showMessage(f"Загружено {count} эталонных подписей.")
             QMessageBox.information(self, "Успех", f"Загружено {count} эталонных подписей.")
+
+    def load_forged_files(self):
+        files, _ = QFileDialog.getOpenFileNames(self, "Выберите поддельные подписи", "", "CSV Files (*.csv);;All Files (*)")
+        if files:
+            self.forged_paths = files
+            self.list_forged.clear()
+            for f in files:
+                item = QListWidgetItem(os.path.basename(f))
+                item.setData(Qt.UserRole, f)
+                self.list_forged.addItem(item)
+
+            count = self.manager.load_forged_signatures(self.forged_paths)
+            self.statusBar().showMessage(f"Загружено {count} поддельных подписей.")
+            QMessageBox.information(self, "Успех", f"Загружено {count} поддельных подписей.")
 
     def load_test_files(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Выберите файлы для проверки", "", "CSV Files (*.csv);;All Files (*)")
@@ -225,7 +255,28 @@ class MainWindow(QMainWindow):
             conf_item.setTextAlignment(Qt.AlignCenter)
             self.table_results.setItem(row_idx, 3, conf_item)
 
-            self.table_results.setItem(row_idx, 4, QTableWidgetItem(str(res['details'])))
+            labels = ["Файл", "Метод", "Вердикт", "Вероятность"]
+
+            if res.get('confidence_log') is not None:
+                labels.append("Вероятность (logistic)")
+                conf_log_val = res['confidence_log']
+                conf_log_item = QTableWidgetItem(f"{conf_log_val:.2f}%")
+                conf_log_item.setTextAlignment(Qt.AlignCenter)
+                self.table_results.setItem(row_idx, 4, conf_log_item)
+
+            if res.get('confidence_iso') is not None:
+                labels.append("Вероятность (isotonic)")
+                conf_iso_val = res['confidence_iso']
+                conf_iso_item = QTableWidgetItem(f"{conf_iso_val:.2f}%")
+                conf_iso_item.setTextAlignment(Qt.AlignCenter)
+                self.table_results.setItem(row_idx, 5, conf_iso_item)
+
+            labels.append("Детали")
+            self.table_results.setHorizontalHeaderLabels(labels)
+            self.table_results.setColumnCount(len(labels))
+            self.table_results.setItem(row_idx, 6, QTableWidgetItem(str(res['details'])))
+
+        self.manager.plot()
 
         self.statusBar().showMessage("Проверка завершена.")
 
