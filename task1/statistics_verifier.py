@@ -28,6 +28,7 @@ class StatisticsSignatureVerifier(SignatureVerifier):
         
         self.kde_genuine = None
         self.kde_forged = None
+        self.forged_distances = None
         self.logistic_calibrator = None
         self.isotonic_calibrator = None
         self.prior_genuine = prior_genuine # априорная вероятность того, что подпись подлинна

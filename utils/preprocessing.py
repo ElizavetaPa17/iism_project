@@ -7,6 +7,8 @@ def find_header_row_and_sep(file_path):
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
+            while lines[0] == "\n" or lines[0] == "":
+                lines = lines[1:]
         for i, line in enumerate(lines[:20]):
             line_lower = line.lower()
             if 'x' in line_lower and 'y' in line_lower:

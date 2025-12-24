@@ -82,6 +82,9 @@ class VerificationManager:
             return {"error": str(e), "is_genuine": False, "confidence": 0.0, "details": str(e)}
         
     def plot(self):
+        if self.current_method_name != self.METHODS[2]:
+            return
+        
         self.current_verifier.plot_distributions()
         self.current_verifier.plot_calibration_curves()
 
